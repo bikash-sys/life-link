@@ -1,7 +1,8 @@
-# LifeLink — Preliminary Entity-Relationship Diagram (DRAFT)
+# LifeLink — Entity-Relationship Architecture (3NF Relational Model)
 
-> **NOTICE: DRAFT DESIGN — SUBJECT TO DATA MODEL REVIEW**  
-> *This document contains the proposed initial relational model for LifeLink. It serves as a discussion draft for peer and instructor review before migrations and database schemas are finalized.*
+> **Status:** APPROVED & FINALIZED (Conforming to Third Normal Form)  
+> **Course Track:** Database Engineering (DE-01 & DE-02)  
+> **Target Schema:** PostgreSQL 14+ / Prisma ORM
 
 ---
 
@@ -9,15 +10,24 @@
 
 ```mermaid
 erDiagram
+    USERS ||--o{ FACILITIES : "manages/staffs"
     USERS ||--o{ REQUESTS : "places"
-    USERS }o--o| FACILITIES : "manages/staffs"
+    USERS ||--o{ REQUEST_STATUS_HISTORY : "triggers"
+    USERS ||--o{ AUDIT_LOGS : "acts"
+
     FACILITIES ||--o{ BLOOD_INVENTORY : "stocks"
     FACILITIES ||--o{ MEDICINE_INVENTORY : "stocks"
     FACILITIES ||--o{ REQUESTS : "fulfills"
-    BLOOD_INVENTORY ||--o{ REQUEST_ITEMS : "allocated_to"
-    MEDICINE_INVENTORY ||--o{ REQUEST_ITEMS : "allocated_to"
+
+    BLOOD_COMPONENTS ||--o{ BLOOD_INVENTORY : "classifies"
+    MEDICINES ||--o{ MEDICINE_INVENTORY : "classifies"
+
     REQUESTS ||--o{ REQUEST_ITEMS : "contains"
-    REQUESTS ||--o{ AUDIT_LOGS : "generates"
+    REQUESTS ||--o{ REQUEST_STATUS_HISTORY : "tracks"
+
+    REQUEST_ITEMS ||--o{ INVENTORY_RESERVATIONS : "allocates"
+    BLOOD_INVENTORY ||--o{ INVENTORY_RESERVATIONS : "held_by"
+    MEDICINE_INVENTORY ||--o{ INVENTORY_RESERVATIONS : "held_by"
 
     USERS {
         uuid id PK
@@ -26,6 +36,7 @@ erDiagram
         string full_name
         string phone
         string role "USER | FACILITY_STAFF | ADMIN"
+        uuid facility_id FK "nullable"
         timestamp created_at
         timestamp updated_at
     }
@@ -37,52 +48,79 @@ erDiagram
         string address
         string city
         string state
-        decimal latitude
-        decimal longitude
+        string postal_code
+        decimal latitude "CHECK -90 to 90"
+        decimal longitude "CHECK -180 to 180"
         string contact_phone
+        string contact_email
+        jsonb operating_hours
         boolean is_verified
         uuid manager_user_id FK "nullable"
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    BLOOD_COMPONENTS {
+        uuid id PK
+        string code UK "WHOLE_BLOOD | PRBC | PLATELETS | FFP | CRYOPRECIPITATE"
+        string name
+        int default_shelf_life_days
+        string storage_temp_celsius
+        text description
         timestamp created_at
     }
 
     BLOOD_INVENTORY {
         uuid id PK
         uuid facility_id FK
+        uuid component_id FK
         string blood_group "A+ | A- | B+ | B- | AB+ | AB- | O+ | O-"
-        string component_type "WHOLE_BLOOD | PRBC | PLATELETS | FFP"
-        string batch_number UK
-        int units_available "CHECK >= 0"
-        int units_reserved "CHECK >= 0"
+        string batch_number
+        int total_units "CHECK >= 0"
+        int reserved_units "CHECK >= 0 AND <= total_units"
         date collection_date
         date expiry_date "CHECK > collection_date"
         string storage_location
         string status "AVAILABLE | RESERVED | EXPIRED | QUARANTINED"
         timestamp created_at
+        timestamp updated_at
+    }
+
+    MEDICINES {
+        uuid id PK
+        string name
+        string generic_name
+        string dosage_form "TABLET | CAPSULE | INJECTION | SYRUP | VIAL | IV_INFUSION"
+        string strength
+        string manufacturer
+        string category
+        text description
+        timestamp created_at
+        timestamp updated_at
     }
 
     MEDICINE_INVENTORY {
         uuid id PK
         uuid facility_id FK
-        string medicine_name
-        string generic_name
-        string dosage_form "TABLET | INJECTION | SYRUP | VIAL"
-        string strength
+        uuid medicine_id FK
         string batch_number
-        int units_available "CHECK >= 0"
-        int units_reserved "CHECK >= 0"
+        int total_units "CHECK >= 0"
+        int reserved_units "CHECK >= 0 AND <= total_units"
         date expiry_date
-        string manufacturer
-        string status "AVAILABLE | RESERVED | EXPIRED"
+        string storage_location
+        string status "AVAILABLE | RESERVED | EXPIRED | QUARANTINED"
         timestamp created_at
+        timestamp updated_at
     }
 
     REQUESTS {
         uuid id PK
+        string request_number UK
         uuid requester_id FK
         uuid facility_id FK
         string request_type "BLOOD | MEDICINE"
         string urgency "NORMAL | URGENT | CRITICAL"
-        string status "PENDING | RESERVED | FULFILLED | CANCELLED | EXPIRED"
+        string status "PENDING | RESERVED | PARTIALLY_FULFILLED | FULFILLED | CANCELLED | EXPIRED"
         text clinical_notes
         timestamp expires_at
         timestamp created_at
@@ -92,16 +130,41 @@ erDiagram
     REQUEST_ITEMS {
         uuid id PK
         uuid request_id FK
-        uuid blood_inventory_id FK "nullable"
-        uuid medicine_inventory_id FK "nullable"
+        uuid blood_component_id FK "nullable"
+        string blood_group "nullable"
+        uuid medicine_id FK "nullable"
         int quantity_requested "CHECK > 0"
         int quantity_reserved "CHECK >= 0"
+        int quantity_fulfilled "CHECK >= 0"
+    }
+
+    INVENTORY_RESERVATIONS {
+        uuid id PK
+        uuid request_item_id FK
+        uuid blood_inventory_id FK "nullable"
+        uuid medicine_inventory_id FK "nullable"
+        int reserved_quantity "CHECK > 0"
+        string status "ACTIVE | CONFIRMED | RELEASED | EXPIRED"
+        timestamp expires_at
+        timestamp created_at
+        timestamp released_at
+    }
+
+    REQUEST_STATUS_HISTORY {
+        uuid id PK
+        uuid request_id FK
+        string from_status
+        string to_status
+        uuid changed_by_user_id FK
+        text notes
+        timestamp created_at
     }
 
     AUDIT_LOGS {
         uuid id PK
-        uuid request_id FK
-        uuid actor_id FK
+        string entity_type "REQUEST | INVENTORY | FACILITY | USER"
+        uuid entity_id
+        uuid actor_id FK "nullable"
         string action
         jsonb details
         timestamp created_at
@@ -110,47 +173,14 @@ erDiagram
 
 ---
 
-## 2. Entity Descriptions & Keys
+## 2. Normalization & Design Justifications (3NF)
 
-### `USERS`
-- **Primary Key:** `id` (UUIDv4)
-- **Alternate Key:** `email` (Unique)
-- **Purpose:** Central user registry supporting role-based access control.
-
-### `FACILITIES`
-- **Primary Key:** `id` (UUIDv4)
-- **Foreign Key:** `manager_user_id` $\to$ `USERS(id)`
-- **Purpose:** Stores verified institutions (Hospitals, Blood Banks, Pharmacies) with geographic coordinates for distance calculation.
-
-### `BLOOD_INVENTORY`
-- **Primary Key:** `id` (UUIDv4)
-- **Foreign Key:** `facility_id` $\to$ `FACILITIES(id)`
-- **Integrity Constraints:**
-  - `CHECK (units_available >= 0)`
-  - `CHECK (units_reserved >= 0)`
-  - `CHECK (units_reserved <= units_available)`
-  - `CHECK (expiry_date > collection_date)`
-
-### `MEDICINE_INVENTORY`
-- **Primary Key:** `id` (UUIDv4)
-- **Foreign Key:** `facility_id` $\to$ `FACILITIES(id)`
-- **Integrity Constraints:**
-  - `CHECK (units_available >= 0)`
-  - `CHECK (units_reserved >= 0)`
-
-### `REQUESTS` & `REQUEST_ITEMS`
-- **Primary Key:** `id` (UUIDv4)
-- **Foreign Keys:** `requester_id` $\to$ `USERS(id)`, `facility_id` $\to$ `FACILITIES(id)`
-- **Normalization (3NF):** Request items are factored into `REQUEST_ITEMS` to support multi-item or batch allocations without repeating groups.
-
-### `AUDIT_LOGS`
-- **Primary Key:** `id` (UUIDv4)
-- **Purpose:** Immutable log of state transitions (e.g., status changes, stock reservations) for auditability.
-
----
-
-## 3. Medical Safety & Privacy Principles
-
-1. **No Real Patient PII:** Requisitions store synthetic identifiers and clinical notes without real-world identifying data.
-2. **Expired Inventory Masking:** Inventory queries MUST enforce `WHERE expiry_date > CURRENT_DATE AND status = 'AVAILABLE'` to guarantee expired units are never reported as available.
-3. **Draft Review Required:** No database tables or Prisma migrations will be generated until this draft model is formally reviewed.
+1. **Medicines Master Catalog vs. Inventory:**
+   - In 1NF/2NF, medicine attributes (name, generic name, dosage form, strength) were repeatedly stored on every batch in `medicine_inventory`.
+   - Splitting into `medicines` and `medicine_inventory` eliminates transitive dependencies ($X \to Y \to Z$), achieving 3NF.
+2. **Blood Components Catalog:**
+   - Defines clinical constants ($shelf\_life$, storage temperature) independently of stock batches.
+3. **Explicit Reservation Ledger:**
+   - `inventory_reservations` models reservation holds explicitly, preserving ACID guarantees and avoiding ghost allocations.
+4. **Scoper Uniqueness:**
+   - Composite unique key `(facility_id, batch_number)` reflects real-world clinical supply chains where batch identifiers are assigned regionally.

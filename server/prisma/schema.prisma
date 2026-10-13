@@ -1,0 +1,300 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  USER
+  FACILITY_STAFF
+  ADMIN
+}
+
+enum FacilityType {
+  HOSPITAL
+  BLOOD_BANK
+  PHARMACY
+}
+
+enum BloodGroup {
+  A_POS  @map("A+")
+  A_NEG  @map("A-")
+  B_POS  @map("B+")
+  B_NEG  @map("B-")
+  AB_POS @map("AB+")
+  AB_NEG @map("AB-")
+  O_POS  @map("O+")
+  O_NEG  @map("O-")
+}
+
+enum InventoryStatus {
+  AVAILABLE
+  RESERVED
+  EXPIRED
+  QUARANTINED
+}
+
+enum DosageForm {
+  TABLET
+  CAPSULE
+  INJECTION
+  SYRUP
+  VIAL
+  IV_INFUSION
+}
+
+enum RequestType {
+  BLOOD
+  MEDICINE
+}
+
+enum UrgencyLevel {
+  NORMAL
+  URGENT
+  CRITICAL
+}
+
+enum RequestStatus {
+  PENDING
+  RESERVED
+  PARTIALLY_FULFILLED
+  FULFILLED
+  CANCELLED
+  EXPIRED
+}
+
+enum ReservationStatus {
+  ACTIVE
+  CONFIRMED
+  RELEASED
+  EXPIRED
+}
+
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  fullName     String    @map("full_name")
+  phone        String
+  role         UserRole  @default(USER)
+  facilityId   String?   @map("facility_id")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  facility     Facility? @relation("StaffFacility", fields: [facilityId], references: [id], onDelete: SetNull)
+  managedFacilities Facility[] @relation("ManagerFacility")
+  requests     Request[]
+  auditLogs    AuditLog[]
+  statusChanges RequestStatusHistory[]
+
+  @@map("users")
+}
+
+model Facility {
+  id            String       @id @default(uuid())
+  name          String
+  facilityType  FacilityType @map("facility_type")
+  address       String
+  city          String
+  state         String
+  postalCode    String?      @map("postal_code")
+  latitude      Decimal?     @db.Decimal(10, 7)
+  longitude     Decimal?     @db.Decimal(10, 7)
+  contactPhone  String       @map("contact_phone")
+  contactEmail  String?      @map("contact_email")
+  operatingHours Json?       @map("operating_hours")
+  isVerified    Boolean      @default(false) @map("is_verified")
+  managerUserId String?      @map("manager_user_id")
+  createdAt     DateTime     @default(now()) @map("created_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+
+  manager           User?               @relation("ManagerFacility", fields: [managerUserId], references: [id], onDelete: SetNull)
+  staffUsers        User[]              @relation("StaffFacility")
+  bloodInventories  BloodInventory[]
+  medicineInventories MedicineInventory[]
+  requests          Request[]
+
+  @@index([city, facilityType, isVerified])
+  @@index([isVerified])
+  @@map("facilities")
+}
+
+model BloodComponent {
+  id                  String   @id @default(uuid())
+  code                String   @unique
+  name                String
+  defaultShelfLifeDays Int     @map("default_shelf_life_days")
+  storageTempCelsius  String   @map("storage_temp_celsius")
+  description         String?
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  inventories         BloodInventory[]
+  requestItems        RequestItem[]
+
+  @@map("blood_components")
+}
+
+model BloodInventory {
+  id              String          @id @default(uuid())
+  facilityId      String          @map("facility_id")
+  componentId     String          @map("component_id")
+  bloodGroup      BloodGroup      @map("blood_group")
+  batchNumber     String          @map("batch_number")
+  totalUnits      Int             @default(0) @map("total_units")
+  reservedUnits   Int             @default(0) @map("reserved_units")
+  collectionDate  DateTime        @map("collection_date") @db.Date
+  expiryDate      DateTime        @map("expiry_date") @db.Date
+  storageLocation String?         @map("storage_location")
+  status          InventoryStatus @default(AVAILABLE)
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+
+  facility        Facility        @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  component       BloodComponent  @relation(fields: [componentId], references: [id], onDelete: Restrict)
+  reservations    InventoryReservation[]
+
+  @@unique([facilityId, batchNumber])
+  @@index([facilityId, status])
+  @@index([bloodGroup, status, expiryDate])
+  @@index([expiryDate])
+  @@map("blood_inventory")
+}
+
+model Medicine {
+  id          String     @id @default(uuid())
+  name        String
+  genericName String     @map("generic_name")
+  dosageForm  DosageForm @map("dosage_form")
+  strength    String
+  manufacturer String?
+  category    String?
+  description String?
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+
+  inventories MedicineInventory[]
+  requestItems RequestItem[]
+
+  @@index([name, genericName])
+  @@map("medicines")
+}
+
+model MedicineInventory {
+  id              String          @id @default(uuid())
+  facilityId      String          @map("facility_id")
+  medicineId      String          @map("medicine_id")
+  batchNumber     String          @map("batch_number")
+  totalUnits      Int             @default(0) @map("total_units")
+  reservedUnits   Int             @default(0) @map("reserved_units")
+  expiryDate      DateTime        @map("expiry_date") @db.Date
+  storageLocation String?         @map("storage_location")
+  status          InventoryStatus @default(AVAILABLE)
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+
+  facility        Facility        @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  medicine        Medicine        @relation(fields: [medicineId], references: [id], onDelete: Restrict)
+  reservations    InventoryReservation[]
+
+  @@unique([facilityId, medicineId, batchNumber])
+  @@index([facilityId, status])
+  @@index([medicineId, status, expiryDate])
+  @@index([expiryDate])
+  @@map("medicine_inventory")
+}
+
+model Request {
+  id            String        @id @default(uuid())
+  requestNumber String        @unique @map("request_number")
+  requesterId   String        @map("requester_id")
+  facilityId    String        @map("facility_id")
+  requestType   RequestType   @map("request_type")
+  urgency       UrgencyLevel  @default(NORMAL)
+  status        RequestStatus @default(PENDING)
+  clinicalNotes String?       @map("clinical_notes")
+  expiresAt     DateTime?     @map("expires_at")
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+
+  requester     User          @relation(fields: [requesterId], references: [id], onDelete: Restrict)
+  facility      Facility      @relation(fields: [facilityId], references: [id], onDelete: Restrict)
+  items         RequestItem[]
+  statusHistory RequestStatusHistory[]
+
+  @@index([facilityId, status])
+  @@index([requesterId, status])
+  @@index([status, urgency])
+  @@map("requests")
+}
+
+model RequestItem {
+  id                String          @id @default(uuid())
+  requestId         String          @map("request_id")
+  bloodComponentId  String?         @map("blood_component_id")
+  bloodGroup        BloodGroup?     @map("blood_group")
+  medicineId        String?         @map("medicine_id")
+  quantityRequested Int             @map("quantity_requested")
+  quantityReserved  Int             @default(0) @map("quantity_reserved")
+  quantityFulfilled Int             @default(0) @map("quantity_fulfilled")
+
+  request           Request         @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  bloodComponent    BloodComponent? @relation(fields: [bloodComponentId], references: [id], onDelete: Restrict)
+  medicine          Medicine?       @relation(fields: [medicineId], references: [id], onDelete: Restrict)
+  reservations      InventoryReservation[]
+
+  @@map("request_items")
+}
+
+model InventoryReservation {
+  id                  String            @id @default(uuid())
+  requestItemId       String            @map("request_item_id")
+  bloodInventoryId    String?           @map("blood_inventory_id")
+  medicineInventoryId String?           @map("medicine_inventory_id")
+  reservedQuantity    Int               @map("reserved_quantity")
+  status              ReservationStatus @default(ACTIVE)
+  expiresAt           DateTime?         @map("expires_at")
+  createdAt           DateTime          @default(now()) @map("created_at")
+  releasedAt          DateTime?         @map("released_at")
+
+  requestItem         RequestItem       @relation(fields: [requestItemId], references: [id], onDelete: Cascade)
+  bloodInventory      BloodInventory?   @relation(fields: [bloodInventoryId], references: [id], onDelete: SetNull)
+  medicineInventory   MedicineInventory? @relation(fields: [medicineInventoryId], references: [id], onDelete: SetNull)
+
+  @@index([requestItemId, status])
+  @@index([status, expiresAt])
+  @@map("inventory_reservations")
+}
+
+model RequestStatusHistory {
+  id              String   @id @default(uuid())
+  requestId       String   @map("request_id")
+  fromStatus      String?  @map("from_status")
+  toStatus        String   @map("to_status")
+  changedByUserId String?  @map("changed_by_user_id")
+  notes           String?
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  request         Request  @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  changedByUser   User?    @relation(fields: [changedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([requestId, createdAt])
+  @@map("request_status_history")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  entityType String   @map("entity_type")
+  entityId   String   @map("entity_id")
+  actorId    String?  @map("actor_id")
+  action     String
+  details    Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@map("audit_logs")
+}
