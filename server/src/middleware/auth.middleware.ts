@@ -1,38 +1,77 @@
 import { Request, Response, NextFunction } from 'express';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { UserRole } from '../types/auth.types.js';
 import { UnauthorizedError, ForbiddenError } from '../errors/appError.js';
 
 /**
- * Extracts and sets authenticated user on `req.user`.
- * Supports Authorization Bearer tokens and testing headers.
- * Seamlessly interfaces with Developer A's planned JWT authentication.
+ * Validates cryptographic HMAC-SHA256 signature for JWT tokens.
+ * Unsigned or tampered tokens are rejected.
+ */
+function verifyJwtSignature(token: string, secret: string): Record<string, unknown> | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+
+    const [headerB64, payloadB64, signatureB64] = parts;
+    const dataToSign = `${headerB64}.${payloadB64}`;
+
+    // Compute expected base64url signature
+    const expectedSig = createHmac('sha256', secret)
+      .update(dataToSign)
+      .digest('base64url');
+
+    // Constant-time comparison to prevent timing attacks
+    const sigBuf = Buffer.from(signatureB64);
+    const expBuf = Buffer.from(expectedSig);
+    if (sigBuf.length !== expBuf.length || !timingSafeEqual(sigBuf, expBuf)) {
+      return null;
+    }
+
+    const payloadJson = Buffer.from(payloadB64, 'base64url').toString('utf8');
+    return JSON.parse(payloadJson);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extracts and verifies authenticated user identity on `req.user`.
+ * - Mock headers and mock tokens are ONLY permitted when NODE_ENV === 'test'.
+ * - In non-test environments, tokens MUST possess a valid cryptographic signature.
+ * - Decoded unsigned JWT claims are NEVER trusted as identity.
  */
 export const authenticate = (
   req: Request,
   _res: Response,
   next: NextFunction
 ): void => {
-  const authHeader = req.headers.authorization;
-  const mockRoleHeader = req.headers['x-user-role'] as UserRole | undefined;
-  const mockIdHeader = req.headers['x-user-id'] as string | undefined;
-  const mockEmailHeader = req.headers['x-user-email'] as string | undefined;
-  const mockFacilityIdHeader = req.headers['x-user-facility-id'] as string | undefined;
+  const isTestEnv = process.env.NODE_ENV === 'test';
 
-  if (process.env.NODE_ENV !== 'production' && mockRoleHeader && mockIdHeader) {
-    req.user = {
-      id: mockIdHeader,
-      email: mockEmailHeader || `${mockIdHeader}@lifelink.local`,
-      role: mockRoleHeader,
-      facilityId: mockFacilityIdHeader || null,
-    };
-    return next();
+  // 1. Test-only mock header extraction (STRICTLY RESTRICTED TO NODE_ENV === 'test')
+  if (isTestEnv) {
+    const mockRoleHeader = req.headers['x-user-role'] as UserRole | undefined;
+    const mockIdHeader = req.headers['x-user-id'] as string | undefined;
+    const mockEmailHeader = req.headers['x-user-email'] as string | undefined;
+    const mockFacilityIdHeader = req.headers['x-user-facility-id'] as string | undefined;
+
+    if (mockRoleHeader && mockIdHeader) {
+      req.user = {
+        id: mockIdHeader,
+        email: mockEmailHeader || `${mockIdHeader}@lifelink.local`,
+        role: mockRoleHeader,
+        facilityId: mockFacilityIdHeader || null,
+      };
+      return next();
+    }
   }
 
+  // 2. Authorization Bearer Token processing
+  const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.substring(7).trim();
 
-    // Standard mock token format: mock-<role>-<userId>[:facilityId]
-    if (token.startsWith('mock-')) {
+    // Test-only mock token format (STRICTLY RESTRICTED TO NODE_ENV === 'test')
+    if (isTestEnv && token.startsWith('mock-')) {
       const parts = token.split('-');
       const role = parts[1] as UserRole;
       const id = parts[2] || 'test-user-id';
@@ -49,24 +88,23 @@ export const authenticate = (
       }
     }
 
-    // Basic JWT payload extraction fallback (base64 payload decode)
-    try {
-      const tokenParts = token.split('.');
-      if (tokenParts.length === 3) {
-        const payloadJson = Buffer.from(tokenParts[1], 'base64').toString('utf8');
-        const payload = JSON.parse(payloadJson);
-        if (payload && payload.id && payload.role) {
-          req.user = {
-            id: payload.id,
-            email: payload.email || `${payload.id}@lifelink.local`,
-            role: payload.role,
-            facilityId: payload.facilityId || null,
-          };
-          return next();
-        }
+    // Cryptographic JWT signature verification
+    const jwtSecret = process.env.JWT_SECRET;
+    if (jwtSecret) {
+      const verifiedPayload = verifyJwtSignature(token, jwtSecret);
+      if (
+        verifiedPayload &&
+        typeof verifiedPayload.id === 'string' &&
+        typeof verifiedPayload.role === 'string'
+      ) {
+        req.user = {
+          id: verifiedPayload.id,
+          email: (verifiedPayload.email as string) || `${verifiedPayload.id}@lifelink.local`,
+          role: verifiedPayload.role as UserRole,
+          facilityId: (verifiedPayload.facilityId as string) || null,
+        };
+        return next();
       }
-    } catch {
-      // If token decoding fails, let req.user remain undefined
     }
   }
 

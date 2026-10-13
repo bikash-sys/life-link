@@ -2,6 +2,10 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import facilityRoutes from './routes/facility.routes.js';
+import bloodComponentRoutes from './routes/bloodComponent.routes.js';
+import bloodInventoryRoutes from './routes/bloodInventory.routes.js';
+import medicineRoutes from './routes/medicine.routes.js';
+import medicineInventoryRoutes from './routes/medicineInventory.routes.js';
 import { errorHandler } from './middleware/errorHandler.middleware.js';
 
 dotenv.config();
@@ -33,6 +37,10 @@ app.get('/api/health', healthHandler);
 
 // API Routes
 app.use('/api/facilities', facilityRoutes);
+app.use('/api/blood-components', bloodComponentRoutes);
+app.use('/api/blood-inventory', bloodInventoryRoutes);
+app.use('/api/medicines', medicineRoutes);
+app.use('/api/medicine-inventory', medicineInventoryRoutes);
 
 // Catch-all 404 handler for unmapped routes
 app.use((_req: Request, res: Response) => {
