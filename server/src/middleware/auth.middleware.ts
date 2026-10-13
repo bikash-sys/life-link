@@ -18,7 +18,7 @@ export const authenticate = (
   const mockEmailHeader = req.headers['x-user-email'] as string | undefined;
   const mockFacilityIdHeader = req.headers['x-user-facility-id'] as string | undefined;
 
-  if (mockRoleHeader && mockIdHeader) {
+  if (process.env.NODE_ENV !== 'production' && mockRoleHeader && mockIdHeader) {
     req.user = {
       id: mockIdHeader,
       email: mockEmailHeader || `${mockIdHeader}@lifelink.local`,

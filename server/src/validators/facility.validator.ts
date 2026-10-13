@@ -28,8 +28,10 @@ export const createFacilitySchema = z.object({
     .string()
     .trim()
     .regex(/^[A-Za-z0-9\s-]{3,20}$/, 'Invalid postal code format')
+    .or(z.literal(''))
     .optional()
-    .nullable(),
+    .nullable()
+    .transform((val) => (val === '' ? null : val)),
   latitude: z
     .number()
     .min(-90, 'Latitude must be between -90 and 90')
@@ -51,14 +53,22 @@ export const createFacilitySchema = z.object({
     .string()
     .trim()
     .email('Invalid email address format')
+    .or(z.literal(''))
     .optional()
-    .nullable(),
+    .nullable()
+    .transform((val) => (val === '' ? null : val)),
   operatingHours: z
     .record(z.string(), z.unknown())
     .optional()
     .nullable(),
   isVerified: z.boolean().optional(),
-  managerUserId: z.string().uuid('Manager user ID must be a valid UUID').optional().nullable(),
+  managerUserId: z
+    .string()
+    .uuid('Manager user ID must be a valid UUID')
+    .or(z.literal(''))
+    .optional()
+    .nullable()
+    .transform((val) => (val === '' ? null : val)),
 });
 
 export const updateFacilitySchema = createFacilitySchema
@@ -72,11 +82,11 @@ export const facilityQuerySchema = z.object({
   state: z.string().trim().optional(),
   facilityType: facilityTypeEnum.optional(),
   isVerified: z
-    .string()
+    .union([z.boolean(), z.string()])
     .optional()
     .transform((val) => {
-      if (val === 'true') return true;
-      if (val === 'false') return false;
+      if (val === true || val === 'true') return true;
+      if (val === false || val === 'false') return false;
       return undefined;
     }),
   search: z.string().trim().optional(),
