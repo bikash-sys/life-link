@@ -1,6 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { Activity, ShieldAlert, CheckCircle2, Server, Globe, Database, ArrowRight } from 'lucide-react';
 
+const API_URL = import.meta.env.VITE_API_BASE_URL
+  ? import.meta.env.VITE_API_BASE_URL.replace(/\/api$/, '')
+  : 'http://localhost:5001';
+
 export const App: React.FC = () => {
   const [serverHealth, setServerHealth] = useState<{
     status: string;
@@ -12,7 +16,7 @@ export const App: React.FC = () => {
   const checkBackend = async () => {
     setCheckingServer(true);
     try {
-      const res = await fetch('http://localhost:5000/health');
+      const res = await fetch(`${API_URL}/health`);
       if (res.ok) {
         const data = await res.json();
         setServerHealth(data);
@@ -31,7 +35,7 @@ export const App: React.FC = () => {
     const initialCheck = async () => {
       setCheckingServer(true);
       try {
-        const res = await fetch('http://localhost:5000/health');
+        const res = await fetch(`${API_URL}/health`);
         if (res.ok) {
           const data = await res.json();
           if (isMounted) setServerHealth(data);
@@ -113,7 +117,7 @@ export const App: React.FC = () => {
               <div className="card-subtext">
                 {serverHealth?.status === 'ok'
                   ? `${serverHealth.service} (${serverHealth.status})`
-                  : 'Port 5000 • http://localhost:5000/health'}
+                  : `${API_URL}/health`}
               </div>
             </div>
 

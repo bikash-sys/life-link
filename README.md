@@ -41,7 +41,7 @@ life-link/
 ├── server/                      # Express + TypeScript backend API
 │   ├── src/
 │   │   ├── app.ts               # Express configuration & health endpoints
-│   │   └── index.ts             # Server entry point (port 5000)
+│   │   └── index.ts             # Server entry point (port 5001)
 │   └── tests/                   # Vitest & Supertest API tests
 ├── database/                    # Database coursework & scripts
 │   ├── seeds/                   # Synthetic seed data SQL scripts
@@ -117,7 +117,7 @@ npm run dev
 
 Or run services independently:
 ```bash
-# Run server API only (http://localhost:5000)
+# Run server API only (http://localhost:5001)
 npm run dev:server
 
 # Run frontend client only (http://localhost:5173)
