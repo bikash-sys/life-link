@@ -3,6 +3,7 @@ import {
   Facility,
   FacilityFilterOptions,
   PaginatedResult,
+  OperatingHours,
 } from '../types/facility.types.js';
 import { AuthUser } from '../types/auth.types.js';
 import {
@@ -13,10 +14,59 @@ import {
   NotFoundError,
   ForbiddenError,
 } from '../errors/appError.js';
+import { getPrismaClient } from '../db/prisma.js';
 
 export class FacilityService {
-  // Resilient memory store for ultra-fast, deterministic integration tests & offline dev
+  // Resilient memory store for ultra-fast, deterministic unit tests & offline dev
   private static facilitiesStore: Map<string, Facility> = new Map();
+
+  private static isPostgres(): boolean {
+    return process.env.STORAGE_DRIVER === 'postgres';
+  }
+
+  private toFacility(record: {
+    id: string;
+    name: string;
+    facilityType: string;
+    address: string;
+    city: string;
+    state: string;
+    postalCode: string | null;
+    latitude: unknown;
+    longitude: unknown;
+    contactPhone: string;
+    contactEmail: string | null;
+    operatingHours: unknown;
+    isVerified: boolean;
+    managerUserId: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+  }): Facility {
+    return {
+      id: record.id,
+      name: record.name,
+      facilityType: record.facilityType as Facility['facilityType'],
+      address: record.address,
+      city: record.city,
+      state: record.state,
+      postalCode: record.postalCode,
+      latitude:
+        record.latitude !== null && record.latitude !== undefined
+          ? Number(record.latitude)
+          : null,
+      longitude:
+        record.longitude !== null && record.longitude !== undefined
+          ? Number(record.longitude)
+          : null,
+      contactPhone: record.contactPhone,
+      contactEmail: record.contactEmail,
+      operatingHours: record.operatingHours as OperatingHours | null,
+      isVerified: record.isVerified,
+      managerUserId: record.managerUserId,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
 
   /**
    * Resets the store — useful for isolated integration testing suites
@@ -54,6 +104,38 @@ export class FacilityService {
       }
     }
 
+    const managerUserId =
+      data.managerUserId ??
+      (actor?.role === 'FACILITY_STAFF' ? actor.id : null);
+
+    if (FacilityService.isPostgres()) {
+      const prisma = getPrismaClient();
+      const created = await prisma.facility.create({
+        data: {
+          name: data.name,
+          facilityType: data.facilityType,
+          address: data.address,
+          city: data.city,
+          state: data.state,
+          postalCode: data.postalCode ?? null,
+          latitude:
+            data.latitude !== undefined && data.latitude !== null
+              ? data.latitude
+              : null,
+          longitude:
+            data.longitude !== undefined && data.longitude !== null
+              ? data.longitude
+              : null,
+          contactPhone: data.contactPhone,
+          contactEmail: data.contactEmail ?? null,
+          operatingHours: (data.operatingHours as any) ?? null,
+          isVerified,
+          managerUserId,
+        },
+      });
+      return this.toFacility(created);
+    }
+
     const now = new Date();
     const facility: Facility = {
       id: randomUUID(),
@@ -69,7 +151,7 @@ export class FacilityService {
       contactEmail: data.contactEmail ?? null,
       operatingHours: data.operatingHours ?? null,
       isVerified,
-      managerUserId: data.managerUserId ?? (actor?.role === 'FACILITY_STAFF' ? actor.id : null),
+      managerUserId,
       createdAt: now,
       updatedAt: now,
     };
@@ -82,6 +164,17 @@ export class FacilityService {
    * Retrieves a facility by its UUID
    */
   public async getFacilityById(id: string): Promise<Facility> {
+    if (FacilityService.isPostgres()) {
+      const prisma = getPrismaClient();
+      const facility = await prisma.facility.findUnique({
+        where: { id },
+      });
+      if (!facility) {
+        throw new NotFoundError(`Facility with ID '${id}' was not found`);
+      }
+      return this.toFacility(facility);
+    }
+
     const facility = FacilityService.facilitiesStore.get(id);
     if (!facility) {
       throw new NotFoundError(`Facility with ID '${id}' was not found`);
@@ -95,6 +188,55 @@ export class FacilityService {
   public async listFacilities(
     options: FacilityFilterOptions
   ): Promise<PaginatedResult<Facility>> {
+    if (FacilityService.isPostgres()) {
+      const prisma = getPrismaClient();
+      const page = options.page || 1;
+      const limit = options.limit || 10;
+      const skip = (page - 1) * limit;
+
+      const where: any = {};
+      if (options.city) {
+        where.city = { contains: options.city, mode: 'insensitive' };
+      }
+      if (options.state) {
+        where.state = { contains: options.state, mode: 'insensitive' };
+      }
+      if (options.facilityType) {
+        where.facilityType = options.facilityType;
+      }
+      if (options.isVerified !== undefined) {
+        where.isVerified = options.isVerified;
+      }
+      if (options.search) {
+        where.OR = [
+          { name: { contains: options.search, mode: 'insensitive' } },
+          { address: { contains: options.search, mode: 'insensitive' } },
+          { city: { contains: options.search, mode: 'insensitive' } },
+        ];
+      }
+
+      const [records, total] = await Promise.all([
+        prisma.facility.findMany({
+          where,
+          skip,
+          take: limit,
+          orderBy: { createdAt: 'desc' },
+        }),
+        prisma.facility.count({ where }),
+      ]);
+
+      const totalPages = Math.ceil(total / limit) || 1;
+      return {
+        data: records.map((r) => this.toFacility(r)),
+        pagination: {
+          total,
+          page,
+          limit,
+          totalPages,
+        },
+      };
+    }
+
     let facilities = Array.from(FacilityService.facilitiesStore.values());
 
     // Filter by city (case-insensitive substring)
@@ -194,6 +336,48 @@ export class FacilityService {
       }
     }
 
+    if (FacilityService.isPostgres()) {
+      const prisma = getPrismaClient();
+      const updated = await prisma.facility.update({
+        where: { id },
+        data: {
+          ...(updates.name !== undefined ? { name: updates.name } : {}),
+          ...(updates.facilityType !== undefined
+            ? { facilityType: updates.facilityType }
+            : {}),
+          ...(updates.address !== undefined ? { address: updates.address } : {}),
+          ...(updates.city !== undefined ? { city: updates.city } : {}),
+          ...(updates.state !== undefined ? { state: updates.state } : {}),
+          ...(updates.postalCode !== undefined
+            ? { postalCode: updates.postalCode ?? null }
+            : {}),
+          ...(updates.latitude !== undefined
+            ? { latitude: updates.latitude ?? null }
+            : {}),
+          ...(updates.longitude !== undefined
+            ? { longitude: updates.longitude ?? null }
+            : {}),
+          ...(updates.contactPhone !== undefined
+            ? { contactPhone: updates.contactPhone }
+            : {}),
+          ...(updates.contactEmail !== undefined
+            ? { contactEmail: updates.contactEmail ?? null }
+            : {}),
+          ...(updates.operatingHours !== undefined
+            ? { operatingHours: (updates.operatingHours as any) ?? null }
+            : {}),
+          ...(updates.isVerified !== undefined && actor.role === 'ADMIN'
+            ? { isVerified: updates.isVerified }
+            : {}),
+          ...(updates.managerUserId !== undefined && actor.role === 'ADMIN'
+            ? { managerUserId: updates.managerUserId ?? null }
+            : {}),
+          updatedAt: new Date(),
+        },
+      });
+      return this.toFacility(updated);
+    }
+
     const updated: Facility = {
       ...existing,
       ...(updates.name !== undefined ? { name: updates.name } : {}),
@@ -248,6 +432,20 @@ export class FacilityService {
       );
     }
 
+    await this.getFacilityById(id);
+
+    if (FacilityService.isPostgres()) {
+      const prisma = getPrismaClient();
+      const updated = await prisma.facility.update({
+        where: { id },
+        data: {
+          isVerified,
+          updatedAt: new Date(),
+        },
+      });
+      return this.toFacility(updated);
+    }
+
     const existing = await this.getFacilityById(id);
     const updated: Facility = {
       ...existing,
@@ -270,6 +468,13 @@ export class FacilityService {
     }
 
     await this.getFacilityById(id);
+
+    if (FacilityService.isPostgres()) {
+      const prisma = getPrismaClient();
+      await prisma.facility.delete({ where: { id } });
+      return;
+    }
+
     FacilityService.facilitiesStore.delete(id);
   }
 }

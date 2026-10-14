@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  BloodGroup,
   BloodComponent,
   BloodInventoryBatch,
   Medicine,
@@ -8,6 +9,7 @@ import {
   BloodInventoryFilterOptions,
   MedicineInventoryFilterOptions,
   MedicineCatalogFilterOptions,
+  InventoryStatus,
 } from '../types/inventory.types.js';
 import { AuthUser } from '../types/auth.types.js';
 import {
@@ -24,6 +26,37 @@ import {
   ConflictError,
 } from '../errors/appError.js';
 import { FacilityService } from './facility.service.js';
+import { getPrismaClient } from '../db/prisma.js';
+
+const bloodGroupToPrisma: Record<string, any> = {
+  'A+': 'A_POS',
+  'A-': 'A_NEG',
+  'B+': 'B_POS',
+  'B-': 'B_NEG',
+  'AB+': 'AB_POS',
+  'AB-': 'AB_NEG',
+  'O+': 'O_POS',
+  'O-': 'O_NEG',
+};
+
+const prismaToBloodGroup: Record<string, BloodGroup> = {
+  A_POS: 'A+',
+  A_NEG: 'A-',
+  B_POS: 'B+',
+  B_NEG: 'B-',
+  AB_POS: 'AB+',
+  AB_NEG: 'AB-',
+  O_POS: 'O+',
+  O_NEG: 'O-',
+  'A+': 'A+',
+  'A-': 'A-',
+  'B+': 'B+',
+  'B-': 'B-',
+  'AB+': 'AB+',
+  'AB-': 'AB-',
+  'O+': 'O+',
+  'O-': 'O-',
+};
 
 export class InventoryService {
   // In-memory repositories for resilient, fast, deterministic testing & mock execution
@@ -44,6 +77,10 @@ export class InventoryService {
 
   constructor() {
     InventoryService.seedDefaultCatalogs();
+  }
+
+  private static isPostgres(): boolean {
+    return process.env.STORAGE_DRIVER === 'postgres';
   }
 
   /**
@@ -158,12 +195,24 @@ export class InventoryService {
         {
           id: '20000000-0000-4000-8000-000000000004',
           name: 'Normal Saline 0.9% IV',
-          genericName: 'Sodium Chloride 0.9% Infusion',
+          genericName: 'Sodium Chloride 0.9%',
           dosageForm: 'IV_INFUSION',
           strength: '0.9% w/v (500 mL)',
           manufacturer: 'Baxter Healthcare',
-          category: 'Intravenous Fluids & Electrolytes',
-          description: 'Isotonic crystalloid fluid resuscitation infusion.',
+          category: 'IV Fluids & Electrolytes',
+          description: 'Isotonic crystalloid fluid for intravenous hydration and resuscitation.',
+          createdAt: new Date('2026-01-01'),
+          updatedAt: new Date('2026-01-01'),
+        },
+        {
+          id: '20000000-0000-4000-8000-000000000005',
+          name: 'Regular Human Insulin 100 IU/ml',
+          genericName: 'Insulin (Regular / Soluble)',
+          dosageForm: 'VIAL',
+          strength: '100 IU/mL (10 mL)',
+          manufacturer: 'Novo Nordisk',
+          category: 'Endocrine & Metabolic / Antidiabetic',
+          description: 'Short-acting human regular insulin for glycemic control in diabetes and ketoacidosis.',
           createdAt: new Date('2026-01-01'),
           updatedAt: new Date('2026-01-01'),
         },
@@ -175,27 +224,23 @@ export class InventoryService {
     }
   }
 
-  // --- Helper Methods ---
-
-  public static getTodayIsoDate(): string {
-    return new Date().toISOString().split('T')[0];
-  }
-
-  public static isDateExpired(dateStr: string): boolean {
-    const today = InventoryService.getTodayIsoDate();
-    return dateStr <= today;
+  public static isDateExpired(dateString: string): boolean {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const target = new Date(dateString);
+    target.setHours(0, 0, 0, 0);
+    return target < today;
   }
 
   public static computeAvailableUnits(
-    totalUnits: number,
-    reservedUnits: number,
+    total: number,
+    reserved: number,
     expiryDate: string,
-    status: string
+    status: InventoryStatus
   ): number {
-    if (status !== 'AVAILABLE' || InventoryService.isDateExpired(expiryDate)) {
-      return 0;
-    }
-    return Math.max(0, totalUnits - reservedUnits);
+    if (status !== 'AVAILABLE') return 0;
+    if (InventoryService.isDateExpired(expiryDate)) return 0;
+    return Math.max(0, total - reserved);
   }
 
   private enforceFacilityStaffAccess(facilityId: string, actor?: AuthUser): void {
@@ -212,13 +257,31 @@ export class InventoryService {
     }
   }
 
-  private logAudit(
+  private async logAudit(
     entityType: string,
     entityId: string,
     action: string,
     details: Record<string, unknown>,
     actor?: AuthUser
-  ): void {
+  ): Promise<void> {
+    if (InventoryService.isPostgres()) {
+      try {
+        const prisma = getPrismaClient();
+        await prisma.auditLog.create({
+          data: {
+            entityType,
+            entityId,
+            actorId: actor?.id || null,
+            action,
+            details: details as any,
+          },
+        });
+      } catch {
+        // Suppress audit log errors in tests
+      }
+      return;
+    }
+
     InventoryService.auditLogsStore.push({
       id: randomUUID(),
       entityType,
@@ -230,15 +293,151 @@ export class InventoryService {
     });
   }
 
+  private toBloodBatch(record: any): BloodInventoryBatch {
+    const collectionDateStr =
+      record.collectionDate instanceof Date
+        ? record.collectionDate.toISOString().slice(0, 10)
+        : String(record.collectionDate);
+    const expiryDateStr =
+      record.expiryDate instanceof Date
+        ? record.expiryDate.toISOString().slice(0, 10)
+        : String(record.expiryDate);
+
+    let status: InventoryStatus = record.status;
+    if (status === 'AVAILABLE' && InventoryService.isDateExpired(expiryDateStr)) {
+      status = 'EXPIRED';
+    }
+
+    const availableUnits = InventoryService.computeAvailableUnits(
+      record.totalUnits,
+      record.reservedUnits,
+      expiryDateStr,
+      status
+    );
+
+    return {
+      id: record.id,
+      facilityId: record.facilityId,
+      componentId: record.componentId,
+      bloodGroup: prismaToBloodGroup[record.bloodGroup] || (record.bloodGroup as BloodGroup),
+      batchNumber: record.batchNumber,
+      totalUnits: record.totalUnits,
+      reservedUnits: record.reservedUnits,
+      availableUnits,
+      collectionDate: collectionDateStr,
+      expiryDate: expiryDateStr,
+      storageLocation: record.storageLocation ?? null,
+      status,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      facilityName: record.facility?.name,
+      facilityCity: record.facility?.city,
+      component: record.component
+        ? {
+            id: record.component.id,
+            code: record.component.code,
+            name: record.component.name,
+            defaultShelfLifeDays: record.component.defaultShelfLifeDays,
+            storageTempCelsius: record.component.storageTempCelsius,
+            description: record.component.description,
+            createdAt: record.component.createdAt,
+          }
+        : undefined,
+    };
+  }
+
+  private toMedicineBatch(record: any): MedicineInventoryBatch {
+    const expiryDateStr =
+      record.expiryDate instanceof Date
+        ? record.expiryDate.toISOString().slice(0, 10)
+        : String(record.expiryDate);
+
+    let status: InventoryStatus = record.status;
+    if (status === 'AVAILABLE' && InventoryService.isDateExpired(expiryDateStr)) {
+      status = 'EXPIRED';
+    }
+
+    const availableUnits = InventoryService.computeAvailableUnits(
+      record.totalUnits,
+      record.reservedUnits,
+      expiryDateStr,
+      status
+    );
+
+    return {
+      id: record.id,
+      facilityId: record.facilityId,
+      medicineId: record.medicineId,
+      batchNumber: record.batchNumber,
+      totalUnits: record.totalUnits,
+      reservedUnits: record.reservedUnits,
+      availableUnits,
+      expiryDate: expiryDateStr,
+      storageLocation: record.storageLocation ?? null,
+      status,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      facilityName: record.facility?.name,
+      facilityCity: record.facility?.city,
+      medicine: record.medicine
+        ? {
+            id: record.medicine.id,
+            name: record.medicine.name,
+            genericName: record.medicine.genericName,
+            dosageForm: record.medicine.dosageForm,
+            strength: record.medicine.strength,
+            manufacturer: record.medicine.manufacturer,
+            category: record.medicine.category,
+            description: record.medicine.description,
+            createdAt: record.medicine.createdAt,
+            updatedAt: record.medicine.updatedAt,
+          }
+        : undefined,
+    };
+  }
+
   // ==========================================
   // 1. BLOOD COMPONENT CATALOG OPERATIONS
   // ==========================================
 
   public async listBloodComponents(): Promise<BloodComponent[]> {
+    if (InventoryService.isPostgres()) {
+      const prisma = getPrismaClient();
+      const records = await prisma.bloodComponent.findMany({
+        orderBy: { code: 'asc' },
+      });
+      return records.map((c) => ({
+        id: c.id,
+        code: c.code,
+        name: c.name,
+        defaultShelfLifeDays: c.defaultShelfLifeDays,
+        storageTempCelsius: c.storageTempCelsius,
+        description: c.description,
+        createdAt: c.createdAt,
+      }));
+    }
     return Array.from(InventoryService.bloodComponentsStore.values());
   }
 
   public async getBloodComponentById(id: string): Promise<BloodComponent> {
+    if (InventoryService.isPostgres()) {
+      const prisma = getPrismaClient();
+      const comp = await prisma.bloodComponent.findUnique({
+        where: { id },
+      });
+      if (!comp) {
+        throw new NotFoundError(`Blood component with ID '${id}' not found`);
+      }
+      return {
+        id: comp.id,
+        code: comp.code,
+        name: comp.name,
+        defaultShelfLifeDays: comp.defaultShelfLifeDays,
+        storageTempCelsius: comp.storageTempCelsius,
+        description: comp.description,
+        createdAt: comp.createdAt,
+      };
+    }
     const comp = InventoryService.bloodComponentsStore.get(id);
     if (!comp) {
       throw new NotFoundError(`Blood component with ID '${id}' not found`);
@@ -254,6 +453,53 @@ export class InventoryService {
     data: Medicine[];
     pagination: { total: number; page: number; limit: number; totalPages: number };
   }> {
+    if (InventoryService.isPostgres()) {
+      const prisma = getPrismaClient();
+      const page = options.page || 1;
+      const limit = options.limit || 10;
+      const skip = (page - 1) * limit;
+
+      const where: any = {};
+      if (options.dosageForm) where.dosageForm = options.dosageForm;
+      if (options.category) {
+        where.category = { contains: options.category, mode: 'insensitive' };
+      }
+      if (options.search) {
+        where.OR = [
+          { name: { contains: options.search, mode: 'insensitive' } },
+          { genericName: { contains: options.search, mode: 'insensitive' } },
+          { strength: { contains: options.search, mode: 'insensitive' } },
+        ];
+      }
+
+      const [records, total] = await Promise.all([
+        prisma.medicine.findMany({
+          where,
+          skip,
+          take: limit,
+          orderBy: { name: 'asc' },
+        }),
+        prisma.medicine.count({ where }),
+      ]);
+
+      const totalPages = Math.ceil(total / limit) || 1;
+      return {
+        data: records.map((m) => ({
+          id: m.id,
+          name: m.name,
+          genericName: m.genericName,
+          dosageForm: m.dosageForm as Medicine['dosageForm'],
+          strength: m.strength,
+          manufacturer: m.manufacturer,
+          category: m.category,
+          description: m.description,
+          createdAt: m.createdAt,
+          updatedAt: m.updatedAt,
+        })),
+        pagination: { total, page, limit, totalPages },
+      };
+    }
+
     let meds = Array.from(InventoryService.medicinesStore.values());
 
     if (options.dosageForm) {
@@ -287,6 +533,28 @@ export class InventoryService {
   }
 
   public async getMedicineById(id: string): Promise<Medicine> {
+    if (InventoryService.isPostgres()) {
+      const prisma = getPrismaClient();
+      const med = await prisma.medicine.findUnique({
+        where: { id },
+      });
+      if (!med) {
+        throw new NotFoundError(`Medicine with ID '${id}' not found`);
+      }
+      return {
+        id: med.id,
+        name: med.name,
+        genericName: med.genericName,
+        dosageForm: med.dosageForm as Medicine['dosageForm'],
+        strength: med.strength,
+        manufacturer: med.manufacturer,
+        category: med.category,
+        description: med.description,
+        createdAt: med.createdAt,
+        updatedAt: med.updatedAt,
+      };
+    }
+
     const med = InventoryService.medicinesStore.get(id);
     if (!med) {
       throw new NotFoundError(`Medicine with ID '${id}' not found`);
@@ -297,6 +565,34 @@ export class InventoryService {
   public async createMedicine(data: CreateMedicineInput, actor?: AuthUser): Promise<Medicine> {
     if (actor?.role !== 'ADMIN') {
       throw new ForbiddenError('Only administrators can add new master medicines to catalog');
+    }
+
+    if (InventoryService.isPostgres()) {
+      const prisma = getPrismaClient();
+      const created = await prisma.medicine.create({
+        data: {
+          name: data.name,
+          genericName: data.genericName,
+          dosageForm: data.dosageForm,
+          strength: data.strength,
+          manufacturer: data.manufacturer || null,
+          category: data.category || null,
+          description: data.description || null,
+        },
+      });
+      await this.logAudit('MEDICINE_CATALOG', created.id, 'CREATE_MEDICINE', data as any, actor);
+      return {
+        id: created.id,
+        name: created.name,
+        genericName: created.genericName,
+        dosageForm: created.dosageForm as Medicine['dosageForm'],
+        strength: created.strength,
+        manufacturer: created.manufacturer,
+        category: created.category,
+        description: created.description,
+        createdAt: created.createdAt,
+        updatedAt: created.updatedAt,
+      };
     }
 
     const now = new Date();
@@ -314,7 +610,7 @@ export class InventoryService {
     };
 
     InventoryService.medicinesStore.set(med.id, med);
-    this.logAudit('MEDICINE_CATALOG', med.id, 'CREATE_MEDICINE', { name: med.name }, actor);
+    this.logAudit('MEDICINE_CATALOG', med.id, 'CREATE_MEDICINE', data as any, actor);
     return med;
   }
 
@@ -328,9 +624,52 @@ export class InventoryService {
   ): Promise<BloodInventoryBatch> {
     this.enforceFacilityStaffAccess(data.facilityId, actor);
 
-    // Verify facility and component exist
     const facility = await new FacilityService().getFacilityById(data.facilityId);
     const component = await this.getBloodComponentById(data.componentId);
+
+    if (InventoryService.isPostgres()) {
+      const prisma = getPrismaClient();
+      const existing = await prisma.bloodInventory.findUnique({
+        where: {
+          facilityId_batchNumber: {
+            facilityId: data.facilityId,
+            batchNumber: data.batchNumber,
+          },
+        },
+      });
+      if (existing) {
+        throw new ConflictError(
+          `A blood batch with identifier '${data.batchNumber}' already exists for facility '${facility.name}'`
+        );
+      }
+
+      let status = data.status || 'AVAILABLE';
+      if (InventoryService.isDateExpired(data.expiryDate)) {
+        status = 'EXPIRED';
+      }
+
+      const created = await prisma.bloodInventory.create({
+        data: {
+          facilityId: data.facilityId,
+          componentId: data.componentId,
+          bloodGroup: (bloodGroupToPrisma[data.bloodGroup] || data.bloodGroup) as any,
+          batchNumber: data.batchNumber,
+          totalUnits: data.totalUnits,
+          reservedUnits: data.reservedUnits || 0,
+          collectionDate: new Date(data.collectionDate),
+          expiryDate: new Date(data.expiryDate),
+          storageLocation: data.storageLocation || null,
+          status,
+        },
+        include: {
+          facility: true,
+          component: true,
+        },
+      });
+
+      await this.logAudit('BLOOD_INVENTORY', created.id, 'CREATE_BATCH', { ...data, status }, actor);
+      return this.toBloodBatch(created);
+    }
 
     // Enforce composite uniqueness: UNIQUE(facility_id, batch_number)
     const existingBatches = Array.from(InventoryService.bloodInventoryStore.values());
@@ -343,7 +682,6 @@ export class InventoryService {
       );
     }
 
-    // Auto-status validation: if batch is already expired on input, cannot be AVAILABLE
     let status = data.status || 'AVAILABLE';
     if (InventoryService.isDateExpired(data.expiryDate)) {
       status = 'EXPIRED';
@@ -384,9 +722,59 @@ export class InventoryService {
     data: BloodInventoryBatch[];
     pagination: { total: number; page: number; limit: number; totalPages: number };
   }> {
+    if (InventoryService.isPostgres()) {
+      const prisma = getPrismaClient();
+      const page = options.page || 1;
+      const limit = options.limit || 10;
+      const skip = (page - 1) * limit;
+
+      const where: any = {};
+      if (options.facilityId) where.facilityId = options.facilityId;
+      if (options.bloodGroup) where.bloodGroup = (bloodGroupToPrisma[options.bloodGroup] || options.bloodGroup) as any;
+      if (options.componentId) where.componentId = options.componentId;
+      if (options.componentCode) {
+        where.component = { code: { equals: options.componentCode, mode: 'insensitive' } };
+      }
+      if (options.status) where.status = options.status;
+      if (options.excludeExpired) {
+        where.expiryDate = { gt: new Date() };
+      }
+      if (options.availableOnly) {
+        where.status = 'AVAILABLE';
+        where.expiryDate = { gt: new Date() };
+      }
+      if (options.search) {
+        where.OR = [
+          { batchNumber: { contains: options.search, mode: 'insensitive' } },
+          { facility: { name: { contains: options.search, mode: 'insensitive' } } },
+        ];
+      }
+
+      const [records, total] = await Promise.all([
+        prisma.bloodInventory.findMany({
+          where,
+          skip,
+          take: limit,
+          include: { facility: true, component: true },
+          orderBy: { expiryDate: 'asc' },
+        }),
+        prisma.bloodInventory.count({ where }),
+      ]);
+
+      let batches = records.map((r) => this.toBloodBatch(r));
+      if (options.availableOnly) {
+        batches = batches.filter((b) => b.availableUnits > 0);
+      }
+
+      const totalPages = Math.ceil(total / limit) || 1;
+      return {
+        data: batches,
+        pagination: { total, page, limit, totalPages },
+      };
+    }
+
     let batches = Array.from(InventoryService.bloodInventoryStore.values());
 
-    // Update dynamic status on read (auto-detect expiration)
     for (const b of batches) {
       if (b.status === 'AVAILABLE' && InventoryService.isDateExpired(b.expiryDate)) {
         b.status = 'EXPIRED';
@@ -440,7 +828,6 @@ export class InventoryService {
       );
     }
 
-    // Sort FIFO: soonest expiring batches first
     batches.sort((a, b) => a.expiryDate.localeCompare(b.expiryDate));
 
     const total = batches.length;
@@ -457,12 +844,23 @@ export class InventoryService {
   }
 
   public async getBloodBatchById(id: string): Promise<BloodInventoryBatch> {
+    if (InventoryService.isPostgres()) {
+      const prisma = getPrismaClient();
+      const batch = await prisma.bloodInventory.findUnique({
+        where: { id },
+        include: { facility: true, component: true },
+      });
+      if (!batch) {
+        throw new NotFoundError(`Blood inventory batch '${id}' not found`);
+      }
+      return this.toBloodBatch(batch);
+    }
+
     const batch = InventoryService.bloodInventoryStore.get(id);
     if (!batch) {
       throw new NotFoundError(`Blood inventory batch '${id}' not found`);
     }
 
-    // Dynamic availability check
     if (batch.status === 'AVAILABLE' && InventoryService.isDateExpired(batch.expiryDate)) {
       batch.status = 'EXPIRED';
       batch.availableUnits = 0;
@@ -493,12 +891,9 @@ export class InventoryService {
       newTotal = batch.totalUnits + updates.quantityDelta;
     }
 
-    // Invariant: totalUnits cannot be negative
     if (newTotal < 0) {
       throw new BadRequestError('Total units cannot be reduced below 0');
     }
-
-    // Invariant: totalUnits cannot be reduced below reserved units
     if (newTotal < batch.reservedUnits) {
       throw new BadRequestError(
         `Total units (${newTotal}) cannot be less than currently active reserved units (${batch.reservedUnits})`
@@ -506,6 +901,37 @@ export class InventoryService {
     }
 
     const newStatus = updates.status || batch.status;
+
+    if (InventoryService.isPostgres()) {
+      const prisma = getPrismaClient();
+      const updated = await prisma.bloodInventory.update({
+        where: { id },
+        data: {
+          totalUnits: newTotal,
+          status: newStatus,
+          storageLocation:
+            updates.storageLocation !== undefined ? updates.storageLocation : batch.storageLocation,
+          updatedAt: new Date(),
+        },
+        include: { facility: true, component: true },
+      });
+
+      await this.logAudit(
+        'BLOOD_INVENTORY',
+        id,
+        'UPDATE_STOCK',
+        {
+          oldTotal: batch.totalUnits,
+          newTotal,
+          reservedUnits: batch.reservedUnits,
+          notes: updates.notes,
+        },
+        actor
+      );
+
+      return this.toBloodBatch(updated);
+    }
+
     const updated: BloodInventoryBatch = {
       ...batch,
       totalUnits: newTotal,
@@ -551,7 +977,46 @@ export class InventoryService {
     const facility = await new FacilityService().getFacilityById(data.facilityId);
     const medicine = await this.getMedicineById(data.medicineId);
 
-    // Enforce composite uniqueness: UNIQUE(facility_id, medicine_id, batch_number)
+    if (InventoryService.isPostgres()) {
+      const prisma = getPrismaClient();
+      const existing = await prisma.medicineInventory.findUnique({
+        where: {
+          facilityId_medicineId_batchNumber: {
+            facilityId: data.facilityId,
+            medicineId: data.medicineId,
+            batchNumber: data.batchNumber,
+          },
+        },
+      });
+      if (existing) {
+        throw new ConflictError(
+          `Batch number '${data.batchNumber}' already exists for medicine '${medicine.name}' at this facility`
+        );
+      }
+
+      let status = data.status || 'AVAILABLE';
+      if (InventoryService.isDateExpired(data.expiryDate)) {
+        status = 'EXPIRED';
+      }
+
+      const created = await prisma.medicineInventory.create({
+        data: {
+          facilityId: data.facilityId,
+          medicineId: data.medicineId,
+          batchNumber: data.batchNumber,
+          totalUnits: data.totalUnits,
+          reservedUnits: data.reservedUnits || 0,
+          expiryDate: new Date(data.expiryDate),
+          storageLocation: data.storageLocation || null,
+          status,
+        },
+        include: { facility: true, medicine: true },
+      });
+
+      await this.logAudit('MEDICINE_INVENTORY', created.id, 'CREATE_BATCH', { ...data, status }, actor);
+      return this.toMedicineBatch(created);
+    }
+
     const existingBatches = Array.from(InventoryService.medicineInventoryStore.values());
     const isDuplicate = existingBatches.some(
       (b) =>
@@ -603,6 +1068,58 @@ export class InventoryService {
     data: MedicineInventoryBatch[];
     pagination: { total: number; page: number; limit: number; totalPages: number };
   }> {
+    if (InventoryService.isPostgres()) {
+      const prisma = getPrismaClient();
+      const page = options.page || 1;
+      const limit = options.limit || 10;
+      const skip = (page - 1) * limit;
+
+      const where: any = {};
+      if (options.facilityId) where.facilityId = options.facilityId;
+      if (options.medicineId) where.medicineId = options.medicineId;
+      if (options.dosageForm) {
+        where.medicine = { dosageForm: options.dosageForm };
+      }
+      if (options.status) where.status = options.status;
+      if (options.excludeExpired) {
+        where.expiryDate = { gt: new Date() };
+      }
+      if (options.availableOnly) {
+        where.status = 'AVAILABLE';
+        where.expiryDate = { gt: new Date() };
+      }
+      if (options.search) {
+        where.OR = [
+          { batchNumber: { contains: options.search, mode: 'insensitive' } },
+          { medicine: { name: { contains: options.search, mode: 'insensitive' } } },
+          { medicine: { genericName: { contains: options.search, mode: 'insensitive' } } },
+          { facility: { name: { contains: options.search, mode: 'insensitive' } } },
+        ];
+      }
+
+      const [records, total] = await Promise.all([
+        prisma.medicineInventory.findMany({
+          where,
+          skip,
+          take: limit,
+          include: { facility: true, medicine: true },
+          orderBy: { expiryDate: 'asc' },
+        }),
+        prisma.medicineInventory.count({ where }),
+      ]);
+
+      let batches = records.map((r) => this.toMedicineBatch(r));
+      if (options.availableOnly) {
+        batches = batches.filter((b) => b.availableUnits > 0);
+      }
+
+      const totalPages = Math.ceil(total / limit) || 1;
+      return {
+        data: batches,
+        pagination: { total, page, limit, totalPages },
+      };
+    }
+
     let batches = Array.from(InventoryService.medicineInventoryStore.values());
 
     for (const b of batches) {
@@ -653,7 +1170,6 @@ export class InventoryService {
       );
     }
 
-    // Sort FIFO by expiration date
     batches.sort((a, b) => a.expiryDate.localeCompare(b.expiryDate));
 
     const total = batches.length;
@@ -670,6 +1186,18 @@ export class InventoryService {
   }
 
   public async getMedicineBatchById(id: string): Promise<MedicineInventoryBatch> {
+    if (InventoryService.isPostgres()) {
+      const prisma = getPrismaClient();
+      const batch = await prisma.medicineInventory.findUnique({
+        where: { id },
+        include: { facility: true, medicine: true },
+      });
+      if (!batch) {
+        throw new NotFoundError(`Medicine inventory batch '${id}' not found`);
+      }
+      return this.toMedicineBatch(batch);
+    }
+
     const batch = InventoryService.medicineInventoryStore.get(id);
     if (!batch) {
       throw new NotFoundError(`Medicine inventory batch '${id}' not found`);
@@ -715,6 +1243,37 @@ export class InventoryService {
     }
 
     const newStatus = updates.status || batch.status;
+
+    if (InventoryService.isPostgres()) {
+      const prisma = getPrismaClient();
+      const updated = await prisma.medicineInventory.update({
+        where: { id },
+        data: {
+          totalUnits: newTotal,
+          status: newStatus,
+          storageLocation:
+            updates.storageLocation !== undefined ? updates.storageLocation : batch.storageLocation,
+          updatedAt: new Date(),
+        },
+        include: { facility: true, medicine: true },
+      });
+
+      await this.logAudit(
+        'MEDICINE_INVENTORY',
+        id,
+        'UPDATE_STOCK',
+        {
+          oldTotal: batch.totalUnits,
+          newTotal,
+          reservedUnits: batch.reservedUnits,
+          notes: updates.notes,
+        },
+        actor
+      );
+
+      return this.toMedicineBatch(updated);
+    }
+
     const updated: MedicineInventoryBatch = {
       ...batch,
       totalUnits: newTotal,
@@ -748,13 +1307,9 @@ export class InventoryService {
   }
 
   // ==========================================
-  // 5. ATOMIC RESERVATION SAFETY CONTRACT (PHASE 4)
+  // 5. ATOMIC RESERVATION SAFETY CONTRACT (ACID)
   // ==========================================
 
-  /**
-   * Concurrency-safe atomic reservation of blood stock.
-   * Enforces: active status, non-expired, and (totalUnits - reservedUnits) >= quantity.
-   */
   public async reserveBloodStock(
     batchId: string,
     quantity: number,
@@ -762,19 +1317,81 @@ export class InventoryService {
     holdDurationMinutes = 120,
     actor?: AuthUser
   ): Promise<ReservationRecord> {
+    if (InventoryService.isPostgres()) {
+      const prisma = getPrismaClient();
+      return await prisma.$transaction(async (tx) => {
+        const rows = await tx.$queryRaw<Array<{
+          id: string;
+          totalUnits: number;
+          reservedUnits: number;
+          expiryDate: Date;
+          status: string;
+          batchNumber: string;
+        }>>`SELECT id, total_units as "totalUnits", reserved_units as "reservedUnits", expiry_date as "expiryDate", status, batch_number as "batchNumber" FROM blood_inventory WHERE id = ${batchId}::uuid FOR UPDATE`;
+        const batch = rows[0];
+        if (!batch) {
+          throw new NotFoundError(`Blood batch '${batchId}' was not found`);
+        }
+
+        const expiryStr = batch.expiryDate.toISOString().slice(0, 10);
+        if (InventoryService.isDateExpired(expiryStr)) {
+          throw new BadRequestError('Cannot reserve stock from an expired blood batch');
+        }
+        if (batch.status !== 'AVAILABLE') {
+          throw new BadRequestError(`Cannot reserve blood batch in status '${batch.status}'`);
+        }
+
+        const currentAvailable = batch.totalUnits - batch.reservedUnits;
+        if (currentAvailable < quantity) {
+          throw new BadRequestError(
+            `Insufficient available stock for batch '${batch.batchNumber}'. Requested: ${quantity}, Available: ${currentAvailable}`
+          );
+        }
+
+        await tx.bloodInventory.update({
+          where: { id: batchId },
+          data: {
+            reservedUnits: { increment: quantity },
+            updatedAt: new Date(),
+          },
+        });
+
+        const now = new Date();
+        const expiresAt = new Date(now.getTime() + holdDurationMinutes * 60 * 1000);
+
+        await tx.auditLog.create({
+          data: {
+            entityType: 'INVENTORY_RESERVATION',
+            entityId: batchId,
+            actorId: actor?.id || null,
+            action: 'RESERVE_BLOOD_STOCK',
+            details: { batchId, quantity, requestItemId, expiresAt },
+          },
+        });
+
+        return {
+          id: randomUUID(),
+          requestItemId,
+          inventoryType: 'BLOOD',
+          batchId,
+          reservedQuantity: quantity,
+          status: 'ACTIVE',
+          expiresAt,
+          createdAt: now,
+          releasedAt: null,
+        };
+      });
+    }
+
     const batch = await this.getBloodBatchById(batchId);
 
-    // Expiry check inside reservation lock
     if (InventoryService.isDateExpired(batch.expiryDate)) {
       throw new BadRequestError('Cannot reserve stock from an expired blood batch');
     }
-
-    // Status check
     if (batch.status !== 'AVAILABLE') {
       throw new BadRequestError(`Cannot reserve blood batch in status '${batch.status}'`);
     }
 
-    // Atomic availability check
     const currentAvailable = batch.totalUnits - batch.reservedUnits;
     if (currentAvailable < quantity) {
       throw new BadRequestError(
@@ -782,7 +1399,6 @@ export class InventoryService {
       );
     }
 
-    // Atomic update
     batch.reservedUnits += quantity;
     batch.availableUnits = Math.max(0, batch.totalUnits - batch.reservedUnits);
     batch.updatedAt = new Date();
@@ -814,15 +1430,41 @@ export class InventoryService {
     return reservation;
   }
 
-  /**
-   * Safe release of reserved blood stock (e.g. cancellation or expiration).
-   */
   public async releaseBloodStock(
     batchId: string,
     quantity: number,
     requestItemId: string,
     actor?: AuthUser
   ): Promise<void> {
+    if (InventoryService.isPostgres()) {
+      const prisma = getPrismaClient();
+      await prisma.$transaction(async (tx) => {
+        const rows = await tx.$queryRaw<Array<{ id: string; reservedUnits: number }>>`SELECT id, reserved_units as "reservedUnits" FROM blood_inventory WHERE id = ${batchId}::uuid FOR UPDATE`;
+        const batch = rows[0];
+        if (!batch) throw new NotFoundError(`Blood batch '${batchId}' was not found`);
+
+        const newReserved = Math.max(0, batch.reservedUnits - quantity);
+        await tx.bloodInventory.update({
+          where: { id: batchId },
+          data: {
+            reservedUnits: newReserved,
+            updatedAt: new Date(),
+          },
+        });
+
+        await tx.auditLog.create({
+          data: {
+            entityType: 'INVENTORY_RESERVATION',
+            entityId: batchId,
+            actorId: actor?.id || null,
+            action: 'RELEASE_BLOOD_STOCK',
+            details: { quantity, requestItemId },
+          },
+        });
+      });
+      return;
+    }
+
     const batch = await this.getBloodBatchById(batchId);
 
     batch.reservedUnits = Math.max(0, batch.reservedUnits - quantity);
@@ -835,7 +1477,6 @@ export class InventoryService {
     batch.updatedAt = new Date();
     InventoryService.bloodInventoryStore.set(batchId, batch);
 
-    // Update reservation record status
     for (const res of InventoryService.reservationsStore.values()) {
       if (res.batchId === batchId && res.requestItemId === requestItemId && res.status === 'ACTIVE') {
         res.status = 'RELEASED';
@@ -852,9 +1493,6 @@ export class InventoryService {
     );
   }
 
-  /**
-   * Concurrency-safe atomic reservation of medicine stock.
-   */
   public async reserveMedicineStock(
     batchId: string,
     quantity: number,
@@ -862,6 +1500,72 @@ export class InventoryService {
     holdDurationMinutes = 120,
     actor?: AuthUser
   ): Promise<ReservationRecord> {
+    if (InventoryService.isPostgres()) {
+      const prisma = getPrismaClient();
+      return await prisma.$transaction(async (tx) => {
+        const rows = await tx.$queryRaw<Array<{
+          id: string;
+          totalUnits: number;
+          reservedUnits: number;
+          expiryDate: Date;
+          status: string;
+          batchNumber: string;
+        }>>`SELECT id, total_units as "totalUnits", reserved_units as "reservedUnits", expiry_date as "expiryDate", status, batch_number as "batchNumber" FROM medicine_inventory WHERE id = ${batchId}::uuid FOR UPDATE`;
+        const batch = rows[0];
+        if (!batch) {
+          throw new NotFoundError(`Medicine batch '${batchId}' was not found`);
+        }
+
+        const expiryStr = batch.expiryDate.toISOString().slice(0, 10);
+        if (InventoryService.isDateExpired(expiryStr)) {
+          throw new BadRequestError('Cannot reserve stock from an expired medicine batch');
+        }
+        if (batch.status !== 'AVAILABLE') {
+          throw new BadRequestError(`Cannot reserve medicine batch in status '${batch.status}'`);
+        }
+
+        const currentAvailable = batch.totalUnits - batch.reservedUnits;
+        if (currentAvailable < quantity) {
+          throw new BadRequestError(
+            `Insufficient available stock for medicine batch '${batch.batchNumber}'. Requested: ${quantity}, Available: ${currentAvailable}`
+          );
+        }
+
+        await tx.medicineInventory.update({
+          where: { id: batchId },
+          data: {
+            reservedUnits: { increment: quantity },
+            updatedAt: new Date(),
+          },
+        });
+
+        const now = new Date();
+        const expiresAt = new Date(now.getTime() + holdDurationMinutes * 60 * 1000);
+
+        await tx.auditLog.create({
+          data: {
+            entityType: 'INVENTORY_RESERVATION',
+            entityId: batchId,
+            actorId: actor?.id || null,
+            action: 'RESERVE_MEDICINE_STOCK',
+            details: { batchId, quantity, requestItemId, expiresAt },
+          },
+        });
+
+        return {
+          id: randomUUID(),
+          requestItemId,
+          inventoryType: 'MEDICINE',
+          batchId,
+          reservedQuantity: quantity,
+          status: 'ACTIVE',
+          expiresAt,
+          createdAt: now,
+          releasedAt: null,
+        };
+      });
+    }
+
     const batch = await this.getMedicineBatchById(batchId);
 
     if (InventoryService.isDateExpired(batch.expiryDate)) {
@@ -909,15 +1613,41 @@ export class InventoryService {
     return reservation;
   }
 
-  /**
-   * Safe release of reserved medicine stock.
-   */
   public async releaseMedicineStock(
     batchId: string,
     quantity: number,
     requestItemId: string,
     actor?: AuthUser
   ): Promise<void> {
+    if (InventoryService.isPostgres()) {
+      const prisma = getPrismaClient();
+      await prisma.$transaction(async (tx) => {
+        const rows = await tx.$queryRaw<Array<{ id: string; reservedUnits: number }>>`SELECT id, reserved_units as "reservedUnits" FROM medicine_inventory WHERE id = ${batchId}::uuid FOR UPDATE`;
+        const batch = rows[0];
+        if (!batch) throw new NotFoundError(`Medicine batch '${batchId}' was not found`);
+
+        const newReserved = Math.max(0, batch.reservedUnits - quantity);
+        await tx.medicineInventory.update({
+          where: { id: batchId },
+          data: {
+            reservedUnits: newReserved,
+            updatedAt: new Date(),
+          },
+        });
+
+        await tx.auditLog.create({
+          data: {
+            entityType: 'INVENTORY_RESERVATION',
+            entityId: batchId,
+            actorId: actor?.id || null,
+            action: 'RELEASE_MEDICINE_STOCK',
+            details: { quantity, requestItemId },
+          },
+        });
+      });
+      return;
+    }
+
     const batch = await this.getMedicineBatchById(batchId);
 
     batch.reservedUnits = Math.max(0, batch.reservedUnits - quantity);
