@@ -8,7 +8,6 @@ export interface JwtPayload {
   facilityId?: string | null;
   iat?: number;
   exp?: number;
-  [key: string]: unknown;
 }
 
 const DEFAULT_EXPIRATION_SECONDS = 24 * 60 * 60; // 24 hours
@@ -52,7 +51,10 @@ export function signToken(
   const now = Math.floor(Date.now() / 1000);
 
   const fullPayload: JwtPayload = {
-    ...payload,
+    id: payload.id,
+    email: payload.email,
+    role: payload.role,
+    facilityId: payload.facilityId,
     iat: now,
     exp: now + expiresInSeconds,
   };
@@ -106,12 +108,14 @@ export function verifyToken(token: string, customSecret?: string): JwtPayload | 
       return null;
     }
 
-    // Verify expiration if exp claim is present
-    if (typeof parsed.exp === 'number') {
-      const now = Math.floor(Date.now() / 1000);
-      if (now > parsed.exp) {
-        return null; // Expired
-      }
+    // Mandatory expiration: reject tokens without a valid, finite exp claim
+    if (typeof parsed.exp !== 'number' || !Number.isFinite(parsed.exp)) {
+      return null;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    if (now > parsed.exp) {
+      return null; // Expired
     }
 
     return parsed;

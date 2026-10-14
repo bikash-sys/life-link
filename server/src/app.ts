@@ -1,6 +1,7 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import authRoutes from './routes/auth.routes.js';
 import facilityRoutes from './routes/facility.routes.js';
 import bloodComponentRoutes from './routes/bloodComponent.routes.js';
 import bloodInventoryRoutes from './routes/bloodInventory.routes.js';
@@ -36,6 +37,7 @@ app.get('/health', healthHandler);
 app.get('/api/health', healthHandler);
 
 // API Routes
+app.use('/api/auth', authRoutes);
 app.use('/api/facilities', facilityRoutes);
 app.use('/api/blood-components', bloodComponentRoutes);
 app.use('/api/blood-inventory', bloodInventoryRoutes);

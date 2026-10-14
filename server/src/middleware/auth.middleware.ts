@@ -1,38 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
-import { createHmac, timingSafeEqual } from 'node:crypto';
 import { UserRole } from '../types/auth.types.js';
 import { UnauthorizedError, ForbiddenError } from '../errors/appError.js';
-
-/**
- * Validates cryptographic HMAC-SHA256 signature for JWT tokens.
- * Unsigned or tampered tokens are rejected.
- */
-function verifyJwtSignature(token: string, secret: string): Record<string, unknown> | null {
-  try {
-    const parts = token.split('.');
-    if (parts.length !== 3) return null;
-
-    const [headerB64, payloadB64, signatureB64] = parts;
-    const dataToSign = `${headerB64}.${payloadB64}`;
-
-    // Compute expected base64url signature
-    const expectedSig = createHmac('sha256', secret)
-      .update(dataToSign)
-      .digest('base64url');
-
-    // Constant-time comparison to prevent timing attacks
-    const sigBuf = Buffer.from(signatureB64);
-    const expBuf = Buffer.from(expectedSig);
-    if (sigBuf.length !== expBuf.length || !timingSafeEqual(sigBuf, expBuf)) {
-      return null;
-    }
-
-    const payloadJson = Buffer.from(payloadB64, 'base64url').toString('utf8');
-    return JSON.parse(payloadJson);
-  } catch {
-    return null;
-  }
-}
+import { verifyToken } from '../utils/jwt.util.js';
 
 /**
  * Extracts and verifies authenticated user identity on `req.user`.
@@ -89,22 +58,19 @@ export const authenticate = (
     }
 
     // Cryptographic JWT signature verification
-    const jwtSecret = process.env.JWT_SECRET;
-    if (jwtSecret) {
-      const verifiedPayload = verifyJwtSignature(token, jwtSecret);
-      if (
-        verifiedPayload &&
-        typeof verifiedPayload.id === 'string' &&
-        typeof verifiedPayload.role === 'string'
-      ) {
-        req.user = {
-          id: verifiedPayload.id,
-          email: (verifiedPayload.email as string) || `${verifiedPayload.id}@lifelink.local`,
-          role: verifiedPayload.role as UserRole,
-          facilityId: (verifiedPayload.facilityId as string) || null,
-        };
-        return next();
-      }
+    const verifiedPayload = verifyToken(token);
+    if (
+      verifiedPayload &&
+      typeof verifiedPayload.id === 'string' &&
+      typeof verifiedPayload.role === 'string'
+    ) {
+      req.user = {
+        id: verifiedPayload.id,
+        email: verifiedPayload.email || `${verifiedPayload.id}@lifelink.local`,
+        role: verifiedPayload.role,
+        facilityId: verifiedPayload.facilityId || null,
+      };
+      return next();
     }
   }
 
