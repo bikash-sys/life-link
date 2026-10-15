@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { registerSchema, loginSchema } from '../validators/auth.validator.js';
 import { userService } from '../services/user.service.js';
+import { notificationService } from '../services/notification.service.js';
 import { UnauthorizedError } from '../errors/appError.js';
 
 export const registerHandler = async (
@@ -11,6 +12,19 @@ export const registerHandler = async (
   try {
     const validated = registerSchema.parse(req.body);
     const result = await userService.register(validated);
+
+    // Asynchronously dispatch WhatsApp welcome notification
+    // Non-blocking: will never delay response, reject request, or roll back registration
+    void notificationService
+      .sendWelcomeNotification({
+        id: result.user.id,
+        fullName: result.user.fullName,
+        phone: result.user.phone,
+        email: result.user.email,
+      })
+      .catch((err) => {
+        console.warn('[Auth] Notification background dispatch error:', err?.message || err);
+      });
 
     res.status(201).json({
       status: 'success',

@@ -42,3 +42,8 @@ coverage/
 # Temporary / Scratch
 tmp/
 temp/
+
+# WhatsApp Client Session & Credentials
+.wauth/
+auth/
+*.wauth
