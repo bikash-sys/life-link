@@ -34,8 +34,13 @@ LifeLink is a centralized, community-driven availability network designed to con
 life-link/
 ├── client/                      # React + Vite + TypeScript frontend
 │   ├── src/
-│   │   ├── App.tsx              # LifeLink base view
-│   │   ├── index.css            # Curated modern CSS tokens
+│   │   ├── components/          # Modular UI components (Layout, Dashboard, Common)
+│   │   ├── pages/               # Route views (LoginPage, DashboardPage)
+│   │   ├── context/             # React Context providers (AuthContext)
+│   │   ├── mock/                # Local mock inventory data layer
+│   │   ├── types/               # TypeScript interfaces
+│   │   ├── App.tsx              # LifeLink router entry
+│   │   ├── index.css            # Restrained healthcare design tokens & layout
 │   │   └── main.tsx             # React entry point
 │   └── vite.config.ts
 ├── server/                      # Express + TypeScript backend API
@@ -139,5 +144,6 @@ npm run build
 ---
 
 ## 📖 Academic Documentation Links
+- [Frontend Foundation & Dashboard Specification (Stage 5)](docs/FRONTEND_FOUNDATION_DASHBOARD.md)
 - [Academic Scope Proposal (AP & DE Checklists)](docs/academic/scope_proposal.md)
 - [Preliminary Draft ER Diagram](docs/database/draft_er_diagram.md)
