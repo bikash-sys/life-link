@@ -116,3 +116,4 @@ All frontend components are verified via automated Vitest and React Testing Libr
 - Total client tests: **6 passing suites**
 - Monorepo TypeScript check: **0 errors (`tsc --noEmit`)**
 - Production bundle size: **~62 kB gzipped**
+
